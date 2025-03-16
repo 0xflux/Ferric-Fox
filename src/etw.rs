@@ -333,7 +333,7 @@ pub fn disable_single_guid() -> Result<(), ()> {
             && guid_entry.guid.to_string() == "EFB251E4-D454-4A02-B126-7FBB9D3991C3"
         {
             println!(
-                "Altering Lazarus abused GUID entry with non-zero value value: {:08b}, GUID: {}",
+                "Altering Lazarus abused GUID entry with non-zero value: {:08b}, GUID: {}",
                 guid_entry.provider_enable_info.is_enabled,
                 guid_entry.guid.to_string()
             );
@@ -343,7 +343,7 @@ pub fn disable_single_guid() -> Result<(), ()> {
             }
 
             println!(
-                "Finished altering Lazarus abused GUID entry with non-zero value value: {:08b}, GUID: {}",
+                "Finished altering Lazarus abused GUID entry with non-zero value: {:08b}, GUID: {}",
                 guid_entry.provider_enable_info.is_enabled,
                 guid_entry.guid.to_string()
             );
