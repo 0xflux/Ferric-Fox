@@ -7,7 +7,7 @@ extern crate wdk_panic;
 use core::{iter::once, ptr::null_mut};
 
 use alloc::vec::Vec;
-use etw::{clear_system_logger_bitmask, patch_etw_kernel_table};
+use etw::{clear_system_logger_bitmask, disable_single_guid, patch_etw_kernel_table};
 use wdk_alloc::WdkAllocator;
 #[global_allocator]
 static GLOBAL_ALLOCATOR: WdkAllocator = WdkAllocator;
@@ -43,7 +43,8 @@ pub unsafe extern "system" fn driver_entry(
     );
 
     // patch_etw_kernel_table();
-    clear_system_logger_bitmask();
+    // clear_system_logger_bitmask();
+    let _ = disable_single_guid();
 
     status
 }

