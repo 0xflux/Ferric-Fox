@@ -1,11 +1,15 @@
 {
     "cSpell.words": [
+        "bitmask",
+        "Etwp",
+        "Lpac",
         "nonoverlapping",
         "ntddk",
         "NTSTATUS",
         "PCUNICODE",
         "PDEVICE",
         "pirp",
-        "PUNICODE"
+        "PUNICODE",
+        "SILODRIVERSTATE"
     ]
 }

