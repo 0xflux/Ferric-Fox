@@ -4,7 +4,7 @@ extern crate alloc;
 #[cfg(not(test))]
 extern crate wdk_panic;
 
-use core::ptr::null_mut;
+use core::{iter::once, ptr::null_mut};
 
 use alloc::vec::Vec;
 use wdk_alloc::WdkAllocator;
@@ -23,7 +23,7 @@ use wdk_sys::{
 };
 
 pub static DOS_DEVICE_NAME: &str = "\\??\\FerricFoxRootkit";
-pub static DRIVER_UM_NAME: &str = "\\\\.\\FerricFoxRootkit";
+pub static DRIVER_UM_NAME: &str = "\\Device\\FerricFoxRootkit";
 
 #[unsafe(export_name = "DriverEntry")] // WDF expects a symbol with the name DriverEntry
 pub unsafe extern "system" fn driver_entry(
@@ -39,6 +39,9 @@ pub unsafe extern "system" fn driver_entry(
         status
     );
 
+    // Automatic unload
+    driver_exit(driver);
+
     status
 }
 
@@ -50,8 +53,8 @@ pub unsafe extern "C" fn configure_driver(
     let mut dos_name = UNICODE_STRING::default();
     let mut nt_name = UNICODE_STRING::default();
 
-    let dos_name_u16: Vec<u16> = DOS_DEVICE_NAME.encode_utf16().collect();
-    let device_name_u16: Vec<u16> = DRIVER_UM_NAME.encode_utf16().collect();
+    let dos_name_u16: Vec<u16> = DOS_DEVICE_NAME.encode_utf16().chain(once(0)).collect();
+    let device_name_u16: Vec<u16> = DRIVER_UM_NAME.encode_utf16().chain(once(0)).collect();
 
     unsafe { RtlInitUnicodeString(&mut dos_name, dos_name_u16.as_ptr()) };
     unsafe { RtlInitUnicodeString(&mut nt_name, device_name_u16.as_ptr()) };

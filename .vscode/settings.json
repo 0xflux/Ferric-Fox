@@ -1,7 +1,10 @@
 {
     "cSpell.words": [
+        "ntddk",
         "NTSTATUS",
         "PCUNICODE",
-        "pirp"
+        "PDEVICE",
+        "pirp",
+        "PUNICODE"
     ]
 }
