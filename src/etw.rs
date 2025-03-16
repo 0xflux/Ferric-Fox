@@ -27,7 +27,7 @@ pub fn patch_etw_kernel_table() {
         };
     }
 
-    println!("[ferric[fox] [+] bytes overwritten.");
+    println!("[ferric-fox] [+] bytes overwritten to null pointers to bypass kernel ETW signals.");
 }
 
 /// Resolves the relative offset to a symbol being searched for by directly reading kernel memory.
