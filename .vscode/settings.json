@@ -1,6 +1,7 @@
 {
     "cSpell.words": [
         "NTSTATUS",
-        "PCUNICODE"
+        "PCUNICODE",
+        "pirp"
     ]
 }
