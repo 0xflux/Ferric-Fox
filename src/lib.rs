@@ -1,3 +1,4 @@
+#![feature(map_try_insert)]
 #![no_std]
 extern crate alloc;
 
